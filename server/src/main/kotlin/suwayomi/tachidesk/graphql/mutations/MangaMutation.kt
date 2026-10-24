@@ -16,7 +16,10 @@ import org.jetbrains.exposed.v1.core.like
 import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.jdbc.batchUpsert
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.update
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.types.ChapterType
@@ -27,6 +30,8 @@ import suwayomi.tachidesk.manga.impl.Library
 import suwayomi.tachidesk.manga.impl.Manga
 import suwayomi.tachidesk.manga.impl.update.IUpdater
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.ChapterUserTable
+import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
 import suwayomi.tachidesk.manga.model.table.MangaMetaTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.MangaUserTable
@@ -70,6 +75,125 @@ class MangaMutation {
         val ids: List<Int>,
         val patch: UpdateMangaPatch,
     )
+
+    data class MergeMangaRecordsInput(
+        val clientMutationId: String? = null,
+        val winnerId: Int,
+        val loserIds: List<Int>,
+    )
+
+    data class MergeMangaRecordsPayload(
+        val clientMutationId: String?,
+        val mergedIds: List<Int>,
+        val skippedIds: List<Int>,
+    )
+
+    /** Merge safe duplicate records while preserving chapters and user state. */
+    @RequireAuth
+    fun mergeMangaRecords(
+        @GraphQLIgnore
+        userId: Int,
+        input: MergeMangaRecordsInput,
+    ): CompletableFuture<MergeMangaRecordsPayload?> {
+        val (clientMutationId, winnerId, loserIds) = input
+
+        return future {
+            val (mergedIds, skippedIds) = transaction {
+                require(MangaTable.selectAll().where { MangaTable.id eq winnerId }.any()) {
+                    "Winner manga does not exist: $winnerId"
+                }
+
+                val merged = mutableListOf<Int>()
+                val skipped = mutableListOf<Int>()
+                loserIds.distinct().filter { it != winnerId }.forEach { loserId ->
+                    val libraryRow =
+                        MangaUserTable
+                            .selectAll()
+                            .where { (MangaUserTable.manga eq loserId) and (MangaUserTable.user eq userId) }
+                            .singleOrNull()
+                    val isInLibrary = libraryRow?.get(MangaUserTable.inLibrary) ?: false
+                    val chapterIds =
+                        ChapterTable
+                            .select(ChapterTable.id)
+                            .where { ChapterTable.manga eq loserId }
+                            .map { it[ChapterTable.id].value }
+                    val hasActiveDownloads =
+                        chapterIds.isNotEmpty() &&
+                            ChapterUserTable
+                                .selectAll()
+                                .where {
+                                    (ChapterUserTable.chapter inList chapterIds) and
+                                        (ChapterUserTable.isDownloaded or ChapterUserTable.isDownloadRequested)
+                                }
+                                .any()
+
+                    if (isInLibrary || hasActiveDownloads) {
+                        skipped += loserId
+                    } else {
+                        CategoryMangaTable
+                            .selectAll()
+                            .where { CategoryMangaTable.manga eq loserId }
+                            .forEach { row ->
+                                val categoryId = row[CategoryMangaTable.category].value
+                                val categoryUserId = row[CategoryMangaTable.user].value
+                                val alreadyLinked =
+                                    CategoryMangaTable
+                                        .selectAll()
+                                        .where {
+                                            (CategoryMangaTable.category eq categoryId) and
+                                                (CategoryMangaTable.manga eq winnerId) and
+                                                (CategoryMangaTable.user eq categoryUserId)
+                                        }
+                                        .any()
+                                if (!alreadyLinked) {
+                                    CategoryMangaTable.insert {
+                                        it[category] = categoryId
+                                        it[manga] = winnerId
+                                        it[user] = categoryUserId
+                                    }
+                                }
+                            }
+                        CategoryMangaTable.deleteWhere { CategoryMangaTable.manga eq loserId }
+
+                        MangaMetaTable
+                            .selectAll()
+                            .where { MangaMetaTable.ref eq loserId }
+                            .forEach { row ->
+                                val metaUserId = row[MangaMetaTable.user].value
+                                val metaKey = row[MangaMetaTable.key]
+                                val alreadyPresent =
+                                    MangaMetaTable
+                                        .selectAll()
+                                        .where {
+                                            (MangaMetaTable.ref eq winnerId) and
+                                                (MangaMetaTable.user eq metaUserId) and
+                                                (MangaMetaTable.key eq metaKey)
+                                        }
+                                        .any()
+                                if (!alreadyPresent) {
+                                    MangaMetaTable.insert {
+                                        it[key] = metaKey
+                                        it[value] = row[MangaMetaTable.value]
+                                        it[ref] = winnerId
+                                        it[user] = metaUserId
+                                    }
+                                }
+                            }
+                        MangaMetaTable.deleteWhere { MangaMetaTable.ref eq loserId }
+
+                        ChapterTable.update({ ChapterTable.manga eq loserId }) {
+                            it[ChapterTable.manga] = winnerId
+                        }
+                        MangaUserTable.deleteWhere { MangaUserTable.manga eq loserId }
+                        MangaTable.deleteWhere { MangaTable.id eq loserId }
+                        merged += loserId
+                    }
+                }
+                merged to skipped
+            }
+            MergeMangaRecordsPayload(clientMutationId, mergedIds, skippedIds)
+        }
+    }
 
     private suspend fun updateMangas(
         @GraphQLIgnore
