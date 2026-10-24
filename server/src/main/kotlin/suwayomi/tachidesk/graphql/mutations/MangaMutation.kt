@@ -181,9 +181,64 @@ class MangaMutation {
                             }
                         MangaMetaTable.deleteWhere { MangaMetaTable.ref eq loserId }
 
-                        ChapterTable.update({ ChapterTable.manga eq loserId }) {
-                            it[ChapterTable.manga] = winnerId
-                        }
+                        val winnerChaptersByUrl =
+                            ChapterTable
+                                .select(ChapterTable.id, ChapterTable.url)
+                                .where { ChapterTable.manga eq winnerId }
+                                .associate { it[ChapterTable.url] to it[ChapterTable.id].value }
+                        ChapterTable
+                            .selectAll()
+                            .where { ChapterTable.manga eq loserId }
+                            .forEach { loserChapter ->
+                                val loserChapterId = loserChapter[ChapterTable.id].value
+                                val winnerChapterId = winnerChaptersByUrl[loserChapter[ChapterTable.url]]
+                                if (winnerChapterId == null) {
+                                    ChapterTable.update({ ChapterTable.id eq loserChapterId }) {
+                                        it[ChapterTable.manga] = winnerId
+                                    }
+                                } else {
+                                    ChapterUserTable
+                                        .selectAll()
+                                        .where { ChapterUserTable.chapter eq loserChapterId }
+                                        .forEach { loserUser ->
+                                            val chapterUserId = loserUser[ChapterUserTable.user].value
+                                            val winnerUser =
+                                                ChapterUserTable
+                                                    .selectAll()
+                                                    .where {
+                                                        (ChapterUserTable.chapter eq winnerChapterId) and
+                                                            (ChapterUserTable.user eq chapterUserId)
+                                                    }
+                                                    .singleOrNull()
+                                            if (winnerUser == null) {
+                                                ChapterUserTable.insert {
+                                                    it[chapter] = winnerChapterId
+                                                    it[user] = chapterUserId
+                                                    it[isRead] = loserUser[ChapterUserTable.isRead]
+                                                    it[isBookmarked] = loserUser[ChapterUserTable.isBookmarked]
+                                                    it[lastPageRead] = loserUser[ChapterUserTable.lastPageRead]
+                                                    it[lastReadAt] = loserUser[ChapterUserTable.lastReadAt]
+                                                    it[isDownloaded] = loserUser[ChapterUserTable.isDownloaded]
+                                                    it[isDownloadRequested] = loserUser[ChapterUserTable.isDownloadRequested]
+                                                    it[koreaderHash] = loserUser[ChapterUserTable.koreaderHash]
+                                                    it[version] = loserUser[ChapterUserTable.version]
+                                                    it[isSyncing] = loserUser[ChapterUserTable.isSyncing]
+                                                    it[lastModifiedAt] = loserUser[ChapterUserTable.lastModifiedAt]
+                                                }
+                                            } else {
+                                                ChapterUserTable.update({ ChapterUserTable.id eq winnerUser[ChapterUserTable.id] }) {
+                                                    it[isRead] = winnerUser[ChapterUserTable.isRead] || loserUser[ChapterUserTable.isRead]
+                                                    it[isBookmarked] = winnerUser[ChapterUserTable.isBookmarked] || loserUser[ChapterUserTable.isBookmarked]
+                                                    it[lastPageRead] = maxOf(winnerUser[ChapterUserTable.lastPageRead], loserUser[ChapterUserTable.lastPageRead])
+                                                    it[lastReadAt] = maxOf(winnerUser[ChapterUserTable.lastReadAt], loserUser[ChapterUserTable.lastReadAt])
+                                                    it[isDownloaded] = winnerUser[ChapterUserTable.isDownloaded] || loserUser[ChapterUserTable.isDownloaded]
+                                                    it[isDownloadRequested] = winnerUser[ChapterUserTable.isDownloadRequested] || loserUser[ChapterUserTable.isDownloadRequested]
+                                                }
+                                            }
+                                        }
+                                    ChapterTable.deleteWhere { ChapterTable.id eq loserChapterId }
+                                }
+                            }
                         MangaUserTable.deleteWhere { MangaUserTable.manga eq loserId }
                         MangaTable.deleteWhere { MangaTable.id eq loserId }
                         merged += loserId
