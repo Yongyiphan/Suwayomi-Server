@@ -1,6 +1,9 @@
 package suwayomi.tachidesk.graphql
 
 import org.junit.jupiter.api.AfterEach
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.SourceMetaTable
 import suwayomi.tachidesk.test.GraphQLTest
 import suwayomi.tachidesk.test.clearTables
@@ -100,6 +103,42 @@ class SourceMutationTest : GraphQLTest() {
 
         response.assertNoErrors()
         assertEquals(2, (response.dataPath("setSourceMetas", "metas") as List<*>).size)
+    }
+
+    @Test
+    fun fetchSourceMangaPreviewDoesNotPersistResults() {
+        val before = transaction { MangaTable.selectAll().count() }
+
+        val response =
+            graphql(
+                """
+                mutation(${'$'}input: FetchSourceMangaInput!) {
+                    fetchSourceMangaPreview(input: ${'$'}input) {
+                        mangas {
+                            sourceId
+                            url
+                            title
+                            description
+                        }
+                        hasNextPage
+                    }
+                }
+                """.trimIndent(),
+                mapOf(
+                    "input" to
+                        mapOf(
+                            "source" to "0",
+                            "type" to "SEARCH",
+                            "page" to 1,
+                            "query" to "preview-test-no-match",
+                        ),
+                ),
+            )
+
+        response.assertNoErrors()
+
+        val after = transaction { MangaTable.selectAll().count() }
+        assertEquals(before, after)
     }
 
     @Test

@@ -8,6 +8,8 @@ import androidx.preference.ListPreference
 import androidx.preference.MultiSelectListPreference
 import androidx.preference.SwitchPreferenceCompat
 import com.expediagroup.graphql.generator.annotations.GraphQLIgnore
+import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.MangasPage
 import org.jetbrains.exposed.v1.core.LikePattern
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.and
@@ -25,6 +27,7 @@ import suwayomi.tachidesk.graphql.types.FilterChange
 import suwayomi.tachidesk.graphql.types.MangaType
 import suwayomi.tachidesk.graphql.types.MetaInput
 import suwayomi.tachidesk.graphql.types.Preference
+import suwayomi.tachidesk.graphql.types.SourceMangaPreviewType
 import suwayomi.tachidesk.graphql.types.SourceMetaType
 import suwayomi.tachidesk.graphql.types.SourceType
 import suwayomi.tachidesk.graphql.types.preferenceOf
@@ -287,6 +290,30 @@ class SourceMutation {
         val hasNextPage: Boolean,
     )
 
+    data class FetchSourceMangaPreviewPayload(
+        val clientMutationId: String?,
+        val mangas: List<SourceMangaPreviewType>,
+        val hasNextPage: Boolean,
+    )
+
+    data class PersistSourceMangaPreviewInput(
+        val clientMutationId: String? = null,
+        val source: Long,
+        val url: String,
+        val title: String,
+        val thumbnailUrl: String? = null,
+        val artist: String? = null,
+        val author: String? = null,
+        val description: String? = null,
+        val genre: String? = null,
+        val status: Int = SManga.UNKNOWN,
+    )
+
+    data class PersistSourceMangaPreviewPayload(
+        val clientMutationId: String?,
+        val manga: MangaType,
+    )
+
     @RequireAuth
     fun fetchSourceManga(
         @GraphQLIgnore
@@ -351,6 +378,79 @@ class SourceMutation {
                 mangas = mangas,
                 hasNextPage = mangasPage.hasNextPage,
             )
+        }
+    }
+
+    /**
+     * Fetch source results without inserting or updating manga rows in H2.
+     * This is intended for migration, duplicate detection, and source preview
+     * workflows where persisting every search result would create library junk.
+     */
+    @RequireAuth
+    fun fetchSourceMangaPreview(
+        input: FetchSourceMangaInput,
+    ): CompletableFuture<FetchSourceMangaPreviewPayload?> {
+        val (clientMutationId, sourceId, type, page, query, filters) = input
+
+        return future {
+            val source = GetSource.getSourceOrNull(sourceId)!!
+            val mangasPage =
+                when (type) {
+                    FetchSourceMangaType.SEARCH -> {
+                        source.getSearchManga(
+                            page = page,
+                            query = query.orEmpty(),
+                            filters = updateFilterList(source, filters),
+                        )
+                    }
+
+                    FetchSourceMangaType.POPULAR -> source.getPopularManga(page)
+                    FetchSourceMangaType.LATEST -> {
+                        if (!source.supportsLatest) throw Exception("Source does not support latest")
+                        source.getLatestUpdates(page)
+                    }
+                }
+
+            FetchSourceMangaPreviewPayload(
+                clientMutationId = clientMutationId,
+                mangas = mangasPage.mangas.map { SourceMangaPreviewType(sourceId, it) },
+                hasNextPage = mangasPage.hasNextPage,
+            )
+        }
+    }
+
+    /** Persist exactly one previously previewed source result for migration. */
+    @RequireAuth
+    fun persistSourceMangaPreview(
+        @GraphQLIgnore
+        userId: Int,
+        input: PersistSourceMangaPreviewInput,
+    ): CompletableFuture<PersistSourceMangaPreviewPayload?> {
+        val (clientMutationId, sourceId, url, title, thumbnailUrl, artist, author, description, genre, status) = input
+
+        return future {
+            GetSource.getSourceOrNull(sourceId)!!
+            val manga =
+                SManga.create().apply {
+                    this.url = url
+                    this.title = title
+                    this.thumbnail_url = thumbnailUrl
+                    this.artist = artist
+                    this.author = author
+                    this.description = description
+                    this.genre = genre
+                    this.status = status
+                }
+            val mangaId = MangasPage(listOf(manga), false).insertOrUpdate(sourceId).single()
+            val persisted =
+                transaction {
+                    MangaTable
+                        .getWithUserData(userId)
+                        .selectAll()
+                        .where { MangaTable.id eq mangaId }
+                        .first()
+                }
+            PersistSourceMangaPreviewPayload(clientMutationId, MangaType(persisted))
         }
     }
 
