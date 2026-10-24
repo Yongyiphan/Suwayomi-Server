@@ -1,6 +1,8 @@
 package suwayomi.tachidesk.graphql.types
 
 import eu.kanade.tachiyomi.source.model.SManga
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 /** A source result that is deliberately not backed by a persisted manga row. */
 data class SourceMangaPreviewType(
@@ -13,6 +15,7 @@ data class SourceMangaPreviewType(
     val description: String?,
     val genre: String?,
     val status: Int,
+    val backend: String?,
 ) {
     constructor(sourceId: Long, manga: SManga) : this(
         sourceId = sourceId,
@@ -24,5 +27,6 @@ data class SourceMangaPreviewType(
         description = manga.description,
         genre = manga.genre,
         status = manga.status,
+        backend = manga.memo["suwa_backend"]?.jsonPrimitive?.contentOrNull,
     )
 }

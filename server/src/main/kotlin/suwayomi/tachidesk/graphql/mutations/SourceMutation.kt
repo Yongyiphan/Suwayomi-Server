@@ -10,6 +10,8 @@ import androidx.preference.SwitchPreferenceCompat
 import com.expediagroup.graphql.generator.annotations.GraphQLIgnore
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.MangasPage
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.jetbrains.exposed.v1.core.LikePattern
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.and
@@ -307,6 +309,7 @@ class SourceMutation {
         val description: String? = null,
         val genre: String? = null,
         val status: Int = SManga.UNKNOWN,
+        val backend: String? = null,
     )
 
     data class PersistSourceMangaPreviewPayload(
@@ -426,7 +429,7 @@ class SourceMutation {
         userId: Int,
         input: PersistSourceMangaPreviewInput,
     ): CompletableFuture<PersistSourceMangaPreviewPayload?> {
-        val (clientMutationId, sourceId, url, title, thumbnailUrl, artist, author, description, genre, status) = input
+        val (clientMutationId, sourceId, url, title, thumbnailUrl, artist, author, description, genre, status, backend) = input
 
         return future {
             GetSource.getSourceOrNull(sourceId)!!
@@ -440,6 +443,9 @@ class SourceMutation {
                     this.description = description
                     this.genre = genre
                     this.status = status
+                    this.memo = buildJsonObject {
+                        backend?.let { put("suwa_backend", it) }
+                    }
                 }
             val mangaId = MangasPage(listOf(manga), false).insertOrUpdate(sourceId).single()
             val persisted =
